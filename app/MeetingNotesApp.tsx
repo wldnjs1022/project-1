@@ -3,9 +3,13 @@
 import { useMemo, useState } from "react";
 import mammoth from "mammoth/mammoth.browser";
 import { marked } from "marked";
+import { Document, HeadingLevel, Packer, Paragraph } from "docx";
 
 type Engine = "openai" | "gemini";
+type Template = "standard" | "evaluation" | "weekly" | "kickoff";
+type ActionItem = { content: string; owner: string; due: string; status: string };
 const defaults: Record<Engine, string> = { openai: "gpt-4o-mini", gemini: "gemini-3.5-flash-lite" };
+const templateLabels: Record<Template, string> = { standard: "일반 회의", evaluation: "평가위원회", weekly: "주간 업무회의", kickoff: "프로젝트 킥오프" };
 const prompt = `당신은 한국어 회의록 편집자입니다. 아래 회의 전사문을 결정사항과 후속조치 중심의 공식 회의록으로 바꿔 주세요.
 
 반드시 다음 Markdown 구조를 지키세요.
@@ -33,13 +37,23 @@ const prompt = `당신은 한국어 회의록 편집자입니다. 아래 회의 
 전사문:
 `;
 
+const download = (blob: Blob, filename: string) => { const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url); };
+const splitRow = (line: string) => line.split("|").slice(1, -1).map((cell) => cell.trim());
+const parseActions = (markdown: string): ActionItem[] => {
+  const section = markdown.match(/##\s*후속 조치([\s\S]*?)(?=\n##\s|$)/i)?.[1] || "";
+  return section.split("\n").filter((line) => line.trim().startsWith("|") && !line.includes("---") && !line.includes("조치 내용") && !line.includes("내용"))
+    .map(splitRow).filter((cells) => cells.length >= 4).map((cells) => ({ content: cells[1] || cells[0], owner: cells[2] || "미정", due: cells[3] || "미정", status: cells[4] || "확인 필요" }));
+};
+
 export function MeetingNotesApp() {
   const [engine, setEngine] = useState<Engine>("openai");
+  const [template, setTemplate] = useState<Template>("standard");
   const [model, setModel] = useState(defaults.openai);
   const [apiKey, setApiKey] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [transcript, setTranscript] = useState("");
   const [result, setResult] = useState("");
+  const [actions, setActions] = useState<ActionItem[]>([]);
   const [status, setStatus] = useState<"idle" | "reading" | "summarizing" | "done" | "error">("idle");
   const [error, setError] = useState("");
   const rendered = useMemo(() => result ? marked.parse(result, { breaks: true }) as string : "", [result]);
@@ -61,16 +75,36 @@ export function MeetingNotesApp() {
     try {
       let output = "";
       if (engine === "openai") {
-        const response = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` }, body: JSON.stringify({ model: model.trim() || defaults.openai, temperature: 0.2, messages: [{ role: "user", content: `${prompt}\n${transcript}` }] }) });
+        const response = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` }, body: JSON.stringify({ model: model.trim() || defaults.openai, temperature: 0.2, messages: [{ role: "user", content: `${prompt}\n선택한 회의 유형: ${templateLabels[template]}\n${transcript}` }] }) });
         const data = await response.json(); if (!response.ok) throw new Error(data?.error?.message || "OpenAI API 요청에 실패했습니다."); output = data?.choices?.[0]?.message?.content || "결과를 받지 못했습니다.";
       } else {
         const geminiModel = (model.trim() || defaults.gemini).replace(/^models\//i, "").trim().toLowerCase().replace(/\s+/g, "-");
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
-        const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: `${prompt}\n${transcript}` }] }] }) });
+        const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: `${prompt}\n선택한 회의 유형: ${templateLabels[template]}\n${transcript}` }] }] }) });
         const data = await response.json(); if (!response.ok) throw new Error(data?.error?.message || "Gemini API 요청에 실패했습니다."); output = data?.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text || "").join("") || "결과를 받지 못했습니다.";
       }
-      setResult(output); setStatus("done");
+      setResult(output); setActions(parseActions(output)); setStatus("done");
     } catch (caught) { setStatus("error"); setError(caught instanceof Error ? caught.message : "요약 중 문제가 발생했습니다."); }
+  };
+
+  const baseName = (file?.name || "회의록").replace(/\.docx$/i, "").replace(/전사문|transcript/gi, "").replace(/[_\s]+$/g, "") || "회의록";
+  const downloadMarkdown = () => result && download(new Blob([result], { type: "text/markdown;charset=utf-8" }), `${baseName}_회의록.md`);
+  const downloadDocx = async () => {
+    if (!result) return;
+    const children = result.split("\n").map((line) => new Paragraph({ text: line.replace(/^#+\s*/, ""), heading: line.startsWith("# ") ? HeadingLevel.TITLE : line.startsWith("## ") ? HeadingLevel.HEADING_1 : line.startsWith("### ") ? HeadingLevel.HEADING_2 : undefined }));
+    download(await Packer.toBlob(new Document({ sections: [{ children }] })), `${baseName}_회의록.docx`);
+  };
+  const downloadPdf = async () => {
+    const target = document.querySelector(".markdown-output") as HTMLElement | null;
+    if (!target) return;
+    const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import("html2canvas"), import("jspdf")]);
+    const canvas = await html2canvas(target, { backgroundColor: "#ffffff", scale: 2 });
+    const pdf = new jsPDF("p", "mm", "a4"); const width = 190; const height = canvas.height * width / canvas.width; pdf.addImage(canvas.toDataURL("image/png"), "PNG", 10, 10, width, height); pdf.save(`${baseName}_회의록.pdf`);
+  };
+  const applyActions = () => {
+    if (!result || !actions.length) return;
+    const table = ["| No. | 조치 내용 | 담당자 | 기한 | 상태 |", "|---:|---|---|---|---|", ...actions.map((item, index) => `| ${index + 1} | ${item.content} | ${item.owner} | ${item.due} | ${item.status} |`)].join("\n");
+    const next = result.replace(/(##\s*후속 조치[\s\S]*?)(?=\n##\s|$)/i, `## 후속 조치\n${table}\n`); setResult(next);
   };
 
   return <main className="site-shell">
@@ -80,6 +114,7 @@ export function MeetingNotesApp() {
       <div className="control-card card">
         <div className="card-heading"><div><span className="step">01</span><h2>전사문 업로드</h2></div><span className="badge">DOCX</span></div>
         <label className={`dropzone ${file ? "has-file" : ""}`}><input type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(event) => event.target.files?.[0] && readFile(event.target.files[0])} />{file ? <><span className="file-icon">✓</span><strong>{file.name}</strong><small>{(file.size / 1024).toFixed(1)} KB · 전사문 읽기 완료</small></> : <><span className="upload-icon">↑</span><strong>DOCX 파일을 여기에 놓거나 클릭</strong><small>회의 전사문 .docx · 브라우저에서만 읽습니다</small></>}</label>
+        <label className="field-label" htmlFor="template">회의록 템플릿</label><select id="template" className="text-input" value={template} onChange={(event) => setTemplate(event.target.value as Template)}>{Object.entries(templateLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         <div className="section-divider" />
         <div className="card-heading compact"><div><span className="step">02</span><h2>요약 엔진 선택</h2></div><span className="secure-label">KEY 미저장</span></div>
         <div className="engine-toggle" role="tablist"><button className={engine === "openai" ? "active" : ""} onClick={() => selectEngine("openai")} role="tab"><span className="engine-logo openai-logo">◎</span>OpenAI</button><button className={engine === "gemini" ? "active" : ""} onClick={() => selectEngine("gemini")} role="tab"><span className="engine-logo gemini-logo">✦</span>Gemini</button></div>
@@ -88,6 +123,11 @@ export function MeetingNotesApp() {
         <p className="privacy-note">🔒 키는 저장하지 않고 이 브라우저에서 API 요청에만 사용합니다.</p><button className="primary-button" onClick={summarize} disabled={status === "reading" || status === "summarizing"}>{status === "summarizing" ? <><span className="spinner" /> 회의록 만드는 중...</> : "회의록 생성하기 →"}</button>{error && <p className="error-message" role="alert">{error}</p>}
       </div>
       <div className="result-card card"><div className="result-header"><div><span className="step">03</span><h2>회의록 결과</h2></div>{result && <span className="result-state"><span className="status-dot" /> 생성 완료</span>}</div>{!result ? <div className="empty-result"><div className="empty-mark">✦</div><h3>요약 결과가 여기에 표시됩니다</h3><p>왼쪽에서 전사문을 업로드하고<br />요약 엔진을 선택해 시작하세요.</p><div className="format-note"><span>#</span> Markdown으로 깔끔하게 정리</div></div> : <article className="markdown-output" dangerouslySetInnerHTML={{ __html: rendered }} />}{status === "reading" && <div className="loading-overlay"><span className="spinner dark" /> 파일을 읽는 중...</div>}</div>
+      {result && <div className="actions-panel card">
+        <div className="actions-heading"><div><span className="step">04</span><h2>후속 조치 확인</h2></div><button className="mini-button" onClick={applyActions}>표에 반영</button></div>
+        {actions.length ? <div className="actions-table"><div className="actions-row actions-head"><span>조치 내용</span><span>담당자</span><span>기한</span><span>상태</span></div>{actions.map((item, index) => <div className="actions-row" key={`${item.content}-${index}`}><input value={item.content} onChange={(event) => setActions((items) => items.map((row, i) => i === index ? { ...row, content: event.target.value } : row))} /><input value={item.owner} onChange={(event) => setActions((items) => items.map((row, i) => i === index ? { ...row, owner: event.target.value } : row))} /><input value={item.due} onChange={(event) => setActions((items) => items.map((row, i) => i === index ? { ...row, due: event.target.value } : row))} /><input value={item.status} onChange={(event) => setActions((items) => items.map((row, i) => i === index ? { ...row, status: event.target.value } : row))} /></div>)}</div> : <p className="muted-note">전사문에서 후속 조치를 찾지 못했습니다. 확인 필요 사항으로 검토해 주세요.</p>}
+        <div className="download-bar"><span>회의록 저장</span><button onClick={downloadMarkdown}>Markdown</button><button onClick={downloadDocx}>DOCX</button><button onClick={downloadPdf}>PDF</button></div>
+      </div>}
     </section>
     <footer><span>MEETING NOTES</span><span>개인 API 키로 안전하게 실행</span></footer>
   </main>;
