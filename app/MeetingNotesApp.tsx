@@ -5,7 +5,7 @@ import mammoth from "mammoth/mammoth.browser";
 import { marked } from "marked";
 
 type Engine = "openai" | "gemini";
-const defaults: Record<Engine, string> = { openai: "gpt-4o-mini", gemini: "Gemini 3.5 Flash-Lite" };
+const defaults: Record<Engine, string> = { openai: "gpt-4o-mini", gemini: "gemini-3.5-flash-lite" };
 const prompt = `당신은 한국어 회의록 편집자입니다. 아래 회의 전사문을 결정사항과 후속조치 중심의 공식 회의록으로 바꿔 주세요.
 
 반드시 다음 Markdown 구조를 지키세요.
@@ -64,7 +64,8 @@ export function MeetingNotesApp() {
         const response = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` }, body: JSON.stringify({ model: model.trim() || defaults.openai, temperature: 0.2, messages: [{ role: "user", content: `${prompt}\n${transcript}` }] }) });
         const data = await response.json(); if (!response.ok) throw new Error(data?.error?.message || "OpenAI API 요청에 실패했습니다."); output = data?.choices?.[0]?.message?.content || "결과를 받지 못했습니다.";
       } else {
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model.trim() || defaults.gemini)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+        const geminiModel = (model.trim() || defaults.gemini).replace(/^models\//i, "").trim().toLowerCase().replace(/\s+/g, "-");
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
         const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: `${prompt}\n${transcript}` }] }] }) });
         const data = await response.json(); if (!response.ok) throw new Error(data?.error?.message || "Gemini API 요청에 실패했습니다."); output = data?.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text || "").join("") || "결과를 받지 못했습니다.";
       }
