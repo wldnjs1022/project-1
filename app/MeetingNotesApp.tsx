@@ -5,7 +5,7 @@ import mammoth from "mammoth/mammoth.browser";
 import { marked } from "marked";
 
 type Engine = "openai" | "gemini";
-const defaults: Record<Engine, string> = { openai: "Luna", gemini: "Gemini 3.5 Flash-Lite" };
+const defaults: Record<Engine, string> = { openai: "gpt-4o-mini", gemini: "Gemini 3.5 Flash-Lite" };
 const prompt = `당신은 한국어 회의록 편집자입니다. 아래 회의 전사문을 결정사항과 후속조치 중심의 공식 회의록으로 바꿔 주세요.
 
 반드시 다음 Markdown 구조를 지키세요.
